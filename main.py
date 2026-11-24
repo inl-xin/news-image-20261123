@@ -3,9 +3,16 @@
 
 make.fun bounty news-image-20261123. Layout follows the house method set on
 2026-11-22: masthead with pink rule, six-cell numbers strip, three hero
-cards, a central Equal Earth map (Natural Earth 110m, embedded in
-mapdata.py) with a region index and DATE CHECK beside it, then 18 small
-cards in three rows of six, an ALSO strip and a sources footer.
+cards, then 18 small cards in rows of 5 / 5 / 5 / 3 (the last row stretched
+to fill), and along the bottom a compact Equal Earth map strip (Natural
+Earth 110m, embedded in mapdata.py, cropped tight to the day's stories)
+with the region index and DATE CHECK beside it, an ALSO strip and a
+sources footer. Type is set large throughout so headlines and card
+titles stay legible when the page is scaled down.
+
+Map markers sit at each story's exact projected lat/long as a small dot;
+where the numbered circles would crowd, the circle is offset nearby and
+tied to its dot with a thin leader line.
 
 All illustrations are flat-vector panels in panels/ (no text in them);
 every word and number on the page is drawn here from the verified brief.
@@ -161,30 +168,46 @@ def wrap(draw, text, fnt, max_w):
     return lines
 
 
-def wrap_balanced(draw, text, fnt, max_w):
-    """Two-line wrap that balances the two lines' widths.
+def wrap_balanced_n(draw, text, fnt, max_w, max_lines):
+    """Balanced wrap into at most max_lines lines.
 
-    Picks the word split minimising the wider line, so neither line
-    hugs one edge while the other sits nearly empty. Falls back to the
-    greedy wrap when no two-line split fits.
+    Uses the greedy line count (capped at max_lines), then chooses the
+    word splits that minimise the widest line, so no line is left with
+    an orphan word while another sprawls. Falls back to the greedy
+    wrap when no split fits.
     """
     words = text.split()
     if len(words) <= 1:
         return [text] if text else []
     greedy = wrap(draw, text, fnt, max_w)
-    if len(greedy) <= 1:
+    k = min(len(greedy), max_lines)
+    if k <= 1:
+        return greedy[:1]
+    n = len(words)
+    width = [draw.textlength(" ".join(words[i:j]), font=fnt)
+             for i in range(n) for j in range(i + 1, n + 1)]
+
+    def w(i, j):
+        return width[i * n - i * (i - 1) // 2 + (j - i - 1)]
+
+    # dp[j][m] = (widest line, split tuple) covering words[:j] in m lines
+    INF = float("inf")
+    dp = [[(INF, None)] * (k + 1) for _ in range(n + 1)]
+    dp[0][0] = (0.0, ())
+    for m in range(1, k + 1):
+        for j in range(1, n + 1):
+            for i in range(j):
+                prev, split = dp[i][m - 1]
+                if split is None or w(i, j) > max_w:
+                    continue
+                cand = max(prev, w(i, j))
+                if cand < dp[j][m][0]:
+                    dp[j][m] = (cand, split + (i,))
+    best, split = dp[n][k]
+    if split is None:
         return greedy
-    best = None
-    for i in range(1, len(words)):
-        a = " ".join(words[:i])
-        b = " ".join(words[i:])
-        wa = draw.textlength(a, font=fnt)
-        wb = draw.textlength(b, font=fnt)
-        if wa <= max_w and wb <= max_w:
-            score = max(wa, wb)
-            if best is None or score < best[0]:
-                best = (score, [a, b])
-    return best[1] if best else greedy
+    bounds = list(split) + [n]
+    return [" ".join(words[bounds[t]:bounds[t + 1]]) for t in range(k)]
 
 
 def ellipsize(draw, line, fnt, max_w):
@@ -195,8 +218,8 @@ def ellipsize(draw, line, fnt, max_w):
 
 def text_block(draw, xy, text, fnt, max_w, max_lines, lh, fill):
     """Wrap text into at most max_lines lines; ellipsis on overflow."""
-    if max_lines == 2:
-        lines = wrap_balanced(draw, text, fnt, max_w)
+    if max_lines >= 2:
+        lines = wrap_balanced_n(draw, text, fnt, max_w, max_lines)
     else:
         lines = wrap(draw, text, fnt, max_w)
     if len(lines) > max_lines:
@@ -209,15 +232,18 @@ def text_block(draw, xy, text, fnt, max_w, max_lines, lh, fill):
     return y
 
 
-def paste_cover(canvas, path, box):
-    """Paste image into box (x0,y0,x1,y1), centre-cropped to cover."""
+def paste_cover(canvas, path, box, fx=0.5, fy=0.5):
+    """Paste image into box (x0,y0,x1,y1), cover-cropped around the
+    focus point (fx, fy as fractions of the source, clamped so the
+    crop window never leaves the image)."""
     x0, y0, x1, y1 = box
     tw, th = x1 - x0, y1 - y0
     im = Image.open(path).convert("RGB")
     scale = max(tw / im.width, th / im.height)
     nw, nh = max(tw, round(im.width * scale)), max(th, round(im.height * scale))
     im = im.resize((nw, nh), Image.LANCZOS)
-    ox, oy = (nw - tw) // 2, (nh - th) // 2
+    ox = min(max(round(fx * nw - tw / 2), 0), nw - tw)
+    oy = min(max(round(fy * nh - th / 2), 0), nh - th)
     canvas.paste(im.crop((ox, oy, ox + tw, oy + th)), (x0, y0))
 
 
@@ -231,32 +257,59 @@ def number_dot(draw, cx, cy, num):
     draw.text((cx - w / 2, cy - 5.5), s, font=fnt, fill=WHITE)
 
 
-def draw_card(canvas, draw, story, x, y, w, h, hero):
+# Crop focus per panel (fractions of the source image). Most panels
+# are centre-composed; a few keep their subject off-centre (4's chip
+# is high right, 6's euro sign low left, 14's clinic right, ...).
+FOCUS = {
+    1: (0.5, 0.48), 2: (0.5, 0.5), 3: (0.5, 0.45), 4: (0.66, 0.5),
+    5: (0.5, 0.5), 6: (0.45, 0.5), 7: (0.45, 0.5), 8: (0.5, 0.5),
+    9: (0.5, 0.5), 10: (0.55, 0.5), 11: (0.5, 0.5), 12: (0.45, 0.5),
+    13: (0.5, 0.5), 14: (0.55, 0.5), 15: (0.45, 0.5), 16: (0.5, 0.5),
+    17: (0.5, 0.5), 18: (0.5, 0.5), 19: (0.5, 0.5), 20: (0.5, 0.5),
+    21: (0.5, 0.5),
+}
+
+
+def draw_card_hero(canvas, draw, story, x, y, w, h):
+    """Hero card: region bar, wide illustration, title, summary."""
     num, region, cat, title, summary, _lat, _lon = story
     bar_c, _tint = REGIONS[region]
     draw.rectangle([x, y, x + w, y + h], fill=PAPER, outline=INK, width=2)
-    bar_h = 15 if hero else 11
-    draw.rectangle([x + 2, y + 2, x + w - 2, y + 2 + bar_h], fill=bar_c)
-    bf = font(9 if hero else 8, bold=True)
-    draw.text((x + 6, y + 2 + (1 if hero else 0)), "%s · %s" % (region, cat),
-              font=bf, fill=WHITE)
-    ill_y = y + 2 + bar_h
-    ill_h = 102 if hero else 60
+    draw.rectangle([x + 2, y + 2, x + w - 2, y + 17], fill=bar_c)
+    draw.text((x + 6, y + 3), "%s · %s" % (region, cat),
+              font=font(10, bold=True), fill=WHITE)
+    fx, fy = FOCUS[num]
     panel = os.path.join(HERE, "panels", "p%02d.webp" % num)
-    paste_cover(canvas, panel, (x + 2, ill_y, x + w - 2, ill_y + ill_h))
-    number_dot(draw, x + w - 2 - 6 - 7, ill_y + 6 + 7, num)
-    tx = x + 7
-    tw = w - 14
-    ty = ill_y + ill_h + 3
-    tf = font(14 if hero else 10, bold=True)
-    title_lh = 17 if hero else 12
-    text_block(draw, (tx, ty), title, tf, tw, 2, title_lh, INK)
-    # the title block always reserves two lines, so summaries in the
-    # same row start at the same y whether the title took 1 or 2 lines
-    sy = ty + 2 * title_lh + 1
-    sf = font(11 if hero else 10)
-    text_block(draw, (tx, sy), summary, sf, tw, 2, 14 if hero else 12,
-               (40, 40, 40))
+    paste_cover(canvas, panel, (x + 2, y + 19, x + w - 2, y + 104), fx, fy)
+    number_dot(draw, x + w - 2 - 6 - 7, y + 19 + 6 + 7, num)
+    tx, tw = x + 7, w - 14
+    tf = font(15, bold=True)
+    text_block(draw, (tx, y + 108), title, tf, tw, 2, 18, INK)
+    # title block always reserves two lines so summaries align
+    text_block(draw, (tx, y + 108 + 2 * 18 + 1), summary, font(12), tw, 2,
+               15, (40, 40, 40))
+
+
+def draw_card_small(canvas, draw, story, x, y, w, h, wide=False):
+    """Small card: region bar, square thumbnail with the title beside
+    it, then the summary full-width below the thumbnail."""
+    num, region, cat, title, summary, _lat, _lon = story
+    bar_c, _tint = REGIONS[region]
+    draw.rectangle([x, y, x + w, y + h], fill=PAPER, outline=INK, width=2)
+    draw.rectangle([x + 2, y + 2, x + w - 2, y + 15], fill=bar_c)
+    draw.text((x + 6, y + 3), "%s · %s" % (region, cat),
+              font=font(9, bold=True), fill=WHITE)
+    thumb = 70 if wide else 60
+    fx, fy = FOCUS[num]
+    panel = os.path.join(HERE, "panels", "p%02d.webp" % num)
+    paste_cover(canvas, panel, (x + 2, y + 17, x + 2 + thumb,
+                                y + 17 + thumb), fx, fy)
+    number_dot(draw, x + 2 + thumb - 6 - 7, y + 17 + 6 + 7, num)
+    tx = x + 8 + thumb
+    text_block(draw, (tx, y + 19), title, font(12, bold=True),
+               x + w - 5 - tx, 4 if not wide else 3, 13, INK)
+    text_block(draw, (x + 7, y + 17 + thumb + 5), summary, font(11),
+               w - 14, 2, 13, (40, 40, 40))
 
 
 # ---- Equal Earth map -------------------------------------------------
@@ -293,75 +346,169 @@ def load_rings():
     return rings
 
 
-def draw_map(canvas, draw, box):
-    x0, y0, x1, y1 = box
-    draw.rectangle(box, fill=PAPER, outline=INK, width=2)
-    draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y0 + 18], fill=INK)
-    draw.text((x0 + 8, y0 + 4), "THE DAY ON THE MAP", font=font(10, bold=True),
-              fill=WHITE)
-    mx0, my0, mx1, my1 = x0 + 6, y0 + 22, x1 - 6, y1 - 6
-    draw.rectangle([mx0, my0, mx1, my1], fill=SEA)
-    # fit: x spans lon -180..180 at the equator; y spans lat -50..75
-    ex, _ = equal_earth(180, 0)
-    _, ytop = equal_earth(0, 75)
-    _, ybot = equal_earth(0, -50)
-    scale = min((mx1 - mx0) / (2 * ex), (my1 - my0) / (ytop - ybot))
-    cx = (mx0 + mx1) / 2
-    cy = my0 + (my1 - my0) / 2 + (ytop + ybot) / 2 * scale
+# The strip is cropped tight around the day's stories: longitude
+# -160..180 (the far Pacific margins go) and latitude -15..54 (the
+# empty southern ocean and the far north go), so land fills the frame.
+MAP_LON0, MAP_LON1 = -160.0, 180.0
+MAP_LAT0, MAP_LAT1 = -15.0, 54.0
+
+# Preferred label offsets (dx, dy) from a story's exact point, used as
+# the solver's starting fan in the crowded clusters: 1 & 7 share New
+# York, 9 & 10 share Washington, 4 & 17 share the Bay Area, and
+# 2/3/6/11/14/20/21 crowd into Europe and the Mediterranean. Isolated
+# stories start (and stay) on their point.
+LABEL_SEED = {
+    1: (-17, -13), 7: (16, -14), 9: (-18, 11), 10: (16, 13),
+    4: (-15, -11), 17: (14, 12),
+    20: (-16, 4), 6: (7, 16), 21: (-17, 15), 3: (-12, 4),
+    14: (13, 12), 11: (19, 13), 2: (-15, 12), 12: (15, 9),
+    13: (16, 2), 15: (11, -11), 18: (-7, -16),
+}
+
+
+def map_projection(sw, sh):
+    """Equal Earth fit of the crop window into an sw x sh layer.
+
+    Returns proj(lon, lat) -> (px, py) in layer coordinates. The
+    equator is the widest parallel, so the x span is measured there.
+    """
+    x_lo = equal_earth(MAP_LON0, 0)[0]
+    x_hi = equal_earth(MAP_LON1, 0)[0]
+    y_hi = equal_earth(0, MAP_LAT1)[1]
+    y_lo = equal_earth(0, MAP_LAT0)[1]
+    scale = min(sw / (x_hi - x_lo), sh / (y_hi - y_lo))
+    x_mid = (x_lo + x_hi) / 2
+    y_mid = (y_hi + y_lo) / 2
 
     def proj(lon, lat):
         px, py = equal_earth(lon, lat)
-        return cx + px * scale, cy - py * scale
+        return (sw / 2 + (px - x_mid) * scale,
+                sh / 2 - (py - y_mid) * scale)
 
+    return proj
+
+
+def solve_labels(anchors, sw, sh):
+    """Place the numbered circles so none overlaps another circle or
+    covers another story's dot, keeping each as close to its own exact
+    point as the crowding allows. Deterministic relaxation from the
+    seeded fan: label-label repulsion (min centre distance 16.5),
+    label-dot repulsion (min 11), a weak spring to the anchor, and a
+    clamp that keeps every circle inside the sea rect."""
+    labels = {}
+    for num, (ax, ay) in anchors.items():
+        dx, dy = LABEL_SEED.get(num, (0, 0))
+        labels[num] = (ax + dx, ay + dy)
+    inset = 8.5
+    for _ in range(600):
+        moved = False
+        for a in sorted(labels):
+            ax, ay = anchors[a]
+            lx, ly = labels[a]
+            fx = (ax - lx) * 0.02
+            fy = (ay - ly) * 0.02
+            for b, (ox, oy) in labels.items():
+                if b == a:
+                    continue
+                dx, dy = lx - ox, ly - oy
+                dist = math.hypot(dx, dy)
+                if dist < 16.5:
+                    if dist < 0.01:
+                        dx, dy, dist = 1.0, 0.0, 1.0
+                    push = (16.5 - dist) / 2 + 0.1
+                    fx += dx / dist * push
+                    fy += dy / dist * push
+            for b, (ox, oy) in anchors.items():
+                if b == a or (ox, oy) == (ax, ay):
+                    continue
+                dx, dy = lx - ox, ly - oy
+                dist = math.hypot(dx, dy)
+                if dist < 11.0:
+                    if dist < 0.01:
+                        dx, dy, dist = 0.0, -1.0, 1.0
+                    fx += dx / dist * (11.0 - dist + 0.1)
+                    fy += dy / dist * (11.0 - dist + 0.1)
+            nx = min(max(lx + fx, inset), sw - inset)
+            ny = min(max(ly + fy, inset), sh - inset)
+            if abs(nx - lx) > 0.005 or abs(ny - ly) > 0.005:
+                moved = True
+            labels[a] = (nx, ny)
+        if not moved:
+            break
+    return labels
+
+
+def render_map_layer(sw, sh):
+    """The sea, land and markers of the map strip, drawn on their own
+    layer so the cropped projection is clipped at the sea rect."""
+    layer = Image.new("RGB", (sw, sh), SEA)
+    d = ImageDraw.Draw(layer)
+    proj = map_projection(sw, sh)
     for ring in load_rings():
         pts = [proj(lon, lat) for lon, lat in ring]
-        draw.polygon(pts, fill=LAND, outline=LAND_EDGE)
-    # story dots; close neighbours get small nudges so the r=7 dots
-    # never overlap: 1 & 7 share New York, 9 & 10 share Washington,
-    # and 2/3/6/11/14/20/21 crowd into Europe and the Mediterranean
-    nudges = {7: (16, -6), 10: (16, 6), 2: (-10, 6), 3: (-7, -10),
-              6: (11, -7), 11: (5, 11), 14: (11, 7), 20: (-12, -5),
-              21: (10, 9)}
+        d.polygon(pts, fill=LAND, outline=LAND_EDGE)
+    anchors = {}
     for story in STORIES:
         num, _r, _c, _t, _s, lat, lon = story
         if lat is None:
             continue
-        dx, dy = nudges.get(num, (0, 0))
-        px, py = proj(lon, lat)
-        number_dot(draw, px + dx, py + dy, num)
+        anchors[num] = proj(lon, lat)
+    labels = solve_labels(anchors, sw, sh)
+    for num, (ax, ay) in anchors.items():
+        lx, ly = labels[num]
+        if math.hypot(lx - ax, ly - ay) > 1.5:
+            d.line([ax, ay, lx, ly], fill=INK, width=1)
+    for num, (ax, ay) in anchors.items():
+        d.ellipse([ax - 2.5, ay - 2.5, ax + 2.5, ay + 2.5], fill=INK,
+                  outline=WHITE, width=1)
+    for num, (lx, ly) in labels.items():
+        number_dot(d, lx, ly, num)
+    return layer
+
+
+def draw_map(canvas, draw, box):
+    x0, y0, x1, y1 = box
+    draw.rectangle(box, fill=PAPER, outline=INK, width=2)
+    draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y0 + 18], fill=INK)
+    draw.text((x0 + 8, y0 + 4), "THE DAY ON THE MAP", font=font(11, bold=True),
+              fill=WHITE)
+    mx0, my0, mx1, my1 = x0 + 6, y0 + 22, x1 - 6, y1 - 6
+    canvas.paste(render_map_layer(mx1 - mx0, my1 - my0), (mx0, my0))
     draw.rectangle([mx0, my0, mx1, my1], outline=INK, width=1)
 
 
-def draw_side_column(draw, x, y, w):
-    # region index
-    draw.rectangle([x, y, x + w, y + 124], fill=PAPER, outline=INK, width=2)
-    draw.text((x + 8, y + 5), "IN THIS ISSUE — BY REGION",
-              font=font(11, bold=True), fill=INK)
-    draw.line([x + 8, y + 22, x + w - 8, y + 22], fill=PINK, width=2)
+def draw_legend(draw, x, y, w, h):
+    # region index, one column of region rows
+    draw.rectangle([x, y, x + w, y + h], fill=PAPER, outline=INK, width=2)
+    draw.text((x + 8, y + 6), "IN THIS ISSUE — BY REGION",
+              font=font(10, bold=True), fill=INK)
+    draw.line([x + 8, y + 24, x + w - 8, y + 24], fill=PINK, width=2)
     by_region = {}
     for story in STORIES:
         by_region.setdefault(story[1], []).append(story[0])
-    ry = y + 28
-    for region in ("AMERICAS", "EUROPE", "ASIA", "MIDDLE EAST", "AFRICA",
-                   "OCEANIA", "GLOBAL"):
+    order = ["AMERICAS", "EUROPE", "ASIA", "MIDDLE EAST", "AFRICA",
+             "OCEANIA", "GLOBAL"]
+    for idx, region in enumerate(order):
+        ry = y + 30 + idx * 15
         bar_c, _t = REGIONS[region]
-        draw.rectangle([x + 8, ry + 2, x + 20, ry + 12], fill=bar_c,
+        draw.rectangle([x + 8, ry + 1, x + 19, ry + 11], fill=bar_c,
                        outline=INK, width=1)
-        draw.text((x + 26, ry), region, font=font(10, bold=True), fill=INK)
+        nf = font(10, bold=True)
+        draw.text((x + 24, ry), region, font=nf, fill=INK)
+        nx = x + 24 + draw.textlength(region, font=nf) + 6
         nums = " ".join(str(n) for n in by_region[region])
-        draw.text((x + 128, ry), nums, font=font(10), fill=(40, 40, 40))
-        if region == "GLOBAL":
-            draw.text((x + 168, ry), "(8 has no dot)", font=font(9),
-                      fill=GREY)
-        ry += 14
-    # date check
-    dy = y + 132
-    draw.rectangle([x, dy, x + w, dy + 108], fill=(255, 248, 235),
+        draw.text((nx, ry + 1), nums, font=font(9), fill=(40, 40, 40))
+    draw.text((x + 8, y + h - 16), "(8 has no dot)", font=font(8),
+              fill=GREY)
+
+
+def draw_date_check(draw, x, y, w, h):
+    draw.rectangle([x, y, x + w, y + h], fill=(255, 248, 235),
                    outline=PINK, width=2)
-    draw.text((x + 10, dy + 5), "DATE CHECK", font=font(11, bold=True),
+    draw.text((x + 10, y + 6), "DATE CHECK", font=font(11, bold=True),
               fill=PINK)
-    text_block(draw, (x + 10, dy + 23), DATE_CHECK, font(9), w - 20, 7, 12,
-               (40, 40, 40))
+    text_block(draw, (x + 10, y + 24), DATE_CHECK, font(10), w - 20, 12,
+               13, (40, 40, 40))
 
 
 def build():
@@ -369,21 +516,22 @@ def build():
     draw = ImageDraw.Draw(img)
 
     # masthead
-    draw.text((MARGIN, MARGIN), "THE DAILY WORLD", font=font(30, bold=True),
-              fill=INK)
+    draw.text((MARGIN, MARGIN + 2), "THE DAILY WORLD",
+              font=font(30, bold=True), fill=INK)
     date_s = "MONDAY 23 NOVEMBER 2026"
     df = font(15, bold=True)
     dw = draw.textlength(date_s, font=df)
-    draw.text((W - MARGIN - dw, MARGIN + 2), date_s, font=df, fill=INK)
+    draw.text((W - MARGIN - dw, MARGIN + 4), date_s, font=df, fill=INK)
     tag = "ONE PAGE · EVERY STORY THAT MATTERED"
     tf = font(9)
     tw = draw.textlength(tag, font=tf)
-    draw.text((W - MARGIN - tw, MARGIN + 24), tag, font=tf, fill=GREY)
-    draw.text((MARGIN, MARGIN + 36), SUBTITLE, font=font(10), fill=(40, 40, 40))
-    draw.rectangle([MARGIN, MARGIN + 52, W - MARGIN, MARGIN + 56], fill=PINK)
+    draw.text((W - MARGIN - tw, MARGIN + 26), tag, font=tf, fill=GREY)
+    draw.text((MARGIN, MARGIN + 38), SUBTITLE, font=font(11),
+              fill=(40, 40, 40))
+    draw.rectangle([MARGIN, MARGIN + 53, W - MARGIN, MARGIN + 57], fill=PINK)
 
     # numbers strip
-    ny = MARGIN + 64
+    ny = MARGIN + 65
     draw.rectangle([MARGIN, ny, W - MARGIN, ny + 44], fill=PAPER,
                    outline=INK, width=1)
     cell = CW / 6
@@ -392,42 +540,50 @@ def build():
         if i:
             draw.line([cx0, ny + 6, cx0, ny + 38], fill=(180, 175, 160),
                       width=1)
-        bf = font(18, bold=True)
+        bf = font(20, bold=True)
         bw = draw.textlength(big, font=bf)
-        draw.text((cx0 + (cell - bw) / 2, ny + 4), big, font=bf, fill=PINK)
-        lf = font(8, bold=True)
+        draw.text((cx0 + (cell - bw) / 2, ny + 3), big, font=bf, fill=PINK)
+        lf = font(9, bold=True)
         lw = draw.textlength(label, font=lf)
-        draw.text((cx0 + (cell - lw) / 2, ny + 29), label, font=lf, fill=INK)
+        draw.text((cx0 + (cell - lw) / 2, ny + 28), label, font=lf, fill=INK)
 
-    # heroes
+    # heroes: three across, ~1.5x the small-card height (180 vs 119)
     hy = ny + 52
     hero_w = (CW - 2 * GAP) // 3
     for i, story in enumerate(STORIES[:3]):
-        draw_card(img, draw, story, MARGIN + i * (hero_w + GAP), hy,
-                  hero_w, 192, hero=True)
+        draw_card_hero(img, draw, story, MARGIN + i * (hero_w + GAP), hy,
+                       hero_w, 180)
 
-    # map band
-    my = hy + 200
-    draw_map(img, draw, (MARGIN, my, MARGIN + 602, my + 240))
-    draw_side_column(draw, MARGIN + 610, my, CW - 610)
-
-    # small panels: 18 cards, three rows of six
-    py = my + 248
-    pw = (CW - 5 * GAP) // 6
+    # small panels: 18 cards, rows of 5 / 5 / 5 / 3; the last row's
+    # three cards stretch to hero width so the row is filled
+    py = hy + 188
+    pw = (CW - 4 * GAP) // 5
+    wide_w = (CW - 2 * GAP) // 3
     for idx, story in enumerate(STORIES[3:]):
-        r, c = divmod(idx, 6)
-        draw_card(img, draw, story, MARGIN + c * (pw + GAP),
-                  py + r * (128 + GAP), pw, 128, hero=False)
+        r, c = divmod(idx, 5)
+        if r < 3:
+            draw_card_small(img, draw, story, MARGIN + c * (pw + GAP),
+                            py + r * (119 + GAP), pw, 119)
+        else:
+            draw_card_small(img, draw, story, MARGIN + c * (wide_w + GAP),
+                            py + r * (119 + GAP), wide_w, 119, wide=True)
+
+    # bottom band: the compact map strip (520 wide), then the region
+    # index and the DATE CHECK box beside it, all 156 tall
+    by = py + 4 * 119 + 3 * GAP + 8
+    draw_map(img, draw, (MARGIN, by, MARGIN + 520, by + 156))
+    draw_legend(draw, MARGIN + 528, by, 176, 156)
+    draw_date_check(draw, MARGIN + 712, by, CW - 712, 156)
 
     # ALSO + sources footer
-    fy = py + 3 * 128 + 2 * GAP + 8
+    fy = by + 166
     draw.line([MARGIN, fy - 4, W - MARGIN, fy - 4], fill=INK, width=1)
     af = font(9, bold=True)
     line = ALSO_LINE
     while draw.textlength(line, font=af) > CW:
         line = line[:-1]
     draw.text((MARGIN, fy), line, font=af, fill=INK)
-    draw.text((MARGIN, fy + 13), SOURCES, font=font(8), fill=GREY)
+    draw.text((MARGIN, fy + 13), SOURCES, font=font(9), fill=GREY)
     return img
 
 
